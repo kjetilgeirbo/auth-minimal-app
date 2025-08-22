@@ -1,6 +1,10 @@
 version: 1
 backend:
   phases:
+    preBuild:
+      commands:
+        # Install dependencies for backend
+        - npm ci
     build:
       commands:
         # Deploy Amplify backend
