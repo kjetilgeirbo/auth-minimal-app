@@ -1,0 +1,31 @@
+version: 1
+backend:
+  phases:
+    build:
+      commands:
+        # Deploy Amplify backend
+        - npx ampx pipeline-deploy --branch $AWS_BRANCH --app-id $AWS_APP_ID
+frontend:
+  phases:
+    preBuild:
+      commands:
+        # Install dependencies
+        - npm ci
+    build:
+      commands:
+        # Build Next.js app
+        - npm run build
+  artifacts:
+    baseDirectory: .next
+    files:
+      - '**/*'
+  cache:
+    paths:
+      - node_modules/**/*
+      - .next/cache/**/*
+  buildSpec:
+    env:
+      variables:
+        AMPLIFY_MONOREPO_APP_ROOT: ''
+        _CUSTOM_IMAGE: 'amplify:al2023'
+        NODE_VERSION: '20'
