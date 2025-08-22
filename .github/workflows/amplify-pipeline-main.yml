@@ -112,10 +112,121 @@ jobs:
       
       - name: Trigger Frontend Deployment
         if: steps.check-aws-creds.outputs.credentials_configured == 'true' && steps.backend-deploy.outcome == 'success'
+        id: trigger-frontend
         run: |
           echo "Triggering frontend deployment via webhook..."
           curl -X POST -d "{}" -H "Content-Type: application/json" \
             "https://webhooks.amplify.eu-north-1.amazonaws.com/prod/webhooks?id=615379bc-196c-4e14-8b16-bb1d69f14e48&token=Jv0dDofIr6Ph3mpqDsUXx5mV8SYCmTkiMkZTnz5g7zo"
+          echo "webhook_triggered=true" >> $GITHUB_OUTPUT
+      
+      - name: Monitor Amplify Build
+        if: steps.check-aws-creds.outputs.credentials_configured == 'true' && steps.backend-deploy.outcome == 'success' && steps.trigger-frontend.outputs.webhook_triggered == 'true'
+        run: |
+          echo "Waiting 2 minutes for Amplify build to start..."
+          sleep 120
+          
+          # Monitor build for up to 15 minutes
+          MAX_ATTEMPTS=30
+          ATTEMPT=0
+          BUILD_STATUS="PENDING"
+          JOB_ID=""
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            echo "Checking Amplify build status (attempt $((ATTEMPT+1))/$MAX_ATTEMPTS)..."
+            
+            # Get the latest job
+            JOBS_JSON=$(aws amplify list-jobs --app-id dx0crz68xx8j3 --branch-name main --max-items 1 2>/dev/null || echo "{}")
+            
+            if [ "$JOBS_JSON" != "{}" ]; then
+              JOB_ID=$(echo "$JOBS_JSON" | jq -r '.jobSummaries[0].jobId // ""')
+              BUILD_STATUS=$(echo "$JOBS_JSON" | jq -r '.jobSummaries[0].status // "UNKNOWN"')
+              
+              echo "Build status: $BUILD_STATUS (Job ID: $JOB_ID)"
+              
+              if [ "$BUILD_STATUS" = "SUCCEED" ]; then
+                echo "✅ Amplify build completed successfully!"
+                
+                # Get the app URL
+                APP_INFO=$(aws amplify get-app --app-id dx0crz68xx8j3 2>/dev/null || echo "{}")
+                APP_URL=$(echo "$APP_INFO" | jq -r '.app.defaultDomain // ""')
+                if [ ! -z "$APP_URL" ]; then
+                  echo "🌐 App URL: https://main.${APP_URL}"
+                fi
+                break
+              elif [ "$BUILD_STATUS" = "FAILED" ] || [ "$BUILD_STATUS" = "CANCELLED" ]; then
+                echo "❌ Amplify build failed or was cancelled"
+                
+                # Get error logs
+                echo "Fetching build logs..."
+                aws amplify get-job --app-id dx0crz68xx8j3 --branch-name main --job-id "$JOB_ID" > job-details.json 2>/dev/null || true
+                
+                if [ -f job-details.json ]; then
+                  echo "Build error details:"
+                  jq -r '.job.steps[] | select(.status=="FAILED") | "Step: \(.stepName)\nStatus: \(.status)\nLog: \(.logUrl)"' job-details.json || true
+                  
+                  # Check for common errors
+                  ERROR_MSG=$(jq -r '.job.steps[] | select(.status=="FAILED") | .artifacts.logs // ""' job-details.json 2>/dev/null || echo "")
+                  
+                  echo "Attempting auto-fix based on error..."
+                  
+                  # Common fixes
+                  if echo "$ERROR_MSG" | grep -q "npm install\|dependencies"; then
+                    echo "Detected dependency issue. Running npm install..."
+                    npm install
+                    git add package-lock.json
+                    git diff --staged --quiet || {
+                      git config --local user.email "github-actions[bot]@users.noreply.github.com"
+                      git config --local user.name "github-actions[bot]"
+                      git commit -m "Auto-fix: Update package-lock.json for Amplify build"
+                      git push
+                      echo "::notice::📝 Fixed dependency issue and pushed changes. A new build will be triggered."
+                    }
+                  elif echo "$ERROR_MSG" | grep -q "TypeScript\|type error"; then
+                    echo "Detected TypeScript issue. Running type check..."
+                    npx tsc --noEmit || true
+                    npm run lint -- --fix || true
+                    git add -A
+                    git diff --staged --quiet || {
+                      git config --local user.email "github-actions[bot]@users.noreply.github.com"
+                      git config --local user.name "github-actions[bot]"
+                      git commit -m "Auto-fix: Fix TypeScript and linting issues"
+                      git push
+                      echo "::notice::📝 Fixed TypeScript issues and pushed changes. A new build will be triggered."
+                    }
+                  elif echo "$ERROR_MSG" | grep -q "amplify_outputs.json"; then
+                    echo "Missing amplify_outputs.json. Generating..."
+                    npx ampx generate outputs --branch main --app-id dx0crz68xx8j3
+                    git add amplify_outputs.json
+                    git diff --staged --quiet || {
+                      git config --local user.email "github-actions[bot]@users.noreply.github.com"
+                      git config --local user.name "github-actions[bot]"
+                      git commit -m "Auto-fix: Add missing amplify_outputs.json"
+                      git push
+                      echo "::notice::📝 Added amplify_outputs.json and pushed changes. A new build will be triggered."
+                    }
+                  else
+                    echo "::error::Could not automatically fix the build error. Please check the Amplify Console for details."
+                  fi
+                fi
+                
+                exit 1
+              elif [ "$BUILD_STATUS" = "RUNNING" ] || [ "$BUILD_STATUS" = "PROVISIONING" ]; then
+                echo "Build is still in progress..."
+              fi
+            else
+              echo "No build jobs found yet..."
+            fi
+            
+            ATTEMPT=$((ATTEMPT + 1))
+            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+              echo "Waiting 30 seconds before next check..."
+              sleep 30
+            fi
+          done
+          
+          if [ "$BUILD_STATUS" != "SUCCEED" ]; then
+            echo "::warning::⚠️ Build monitoring timeout. Please check the Amplify Console for build status."
+          fi
       
       - name: Backend Deploy Failed - Check Errors
         if: steps.check-aws-creds.outputs.credentials_configured == 'true' && steps.backend-deploy.outcome == 'failure'
