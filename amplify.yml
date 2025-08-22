@@ -3,6 +3,8 @@ backend:
   phases:
     preBuild:
       commands:
+        # Set Node.js version
+        - nvm use 20
         # Install dependencies for backend
         - npm ci
     build:
@@ -13,6 +15,8 @@ frontend:
   phases:
     preBuild:
       commands:
+        # Set Node.js version
+        - nvm use 20
         # Install dependencies
         - npm ci
     build:
