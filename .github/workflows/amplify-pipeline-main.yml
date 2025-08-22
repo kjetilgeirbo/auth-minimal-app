@@ -32,7 +32,36 @@ jobs:
           node-version: '20'
           cache: 'npm'
       
+      # CHECK FOR AWS CREDENTIALS FIRST
+      - name: Check AWS Credentials
+        id: check-aws-creds
+        run: |
+          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] || [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "::error::❌ AWS credentials not configured!"
+            echo ""
+            echo "::notice::📝 Please add AWS credentials to GitHub Secrets:"
+            echo "::notice::1. Go to: https://github.com/${{ github.repository }}/settings/secrets/actions"
+            echo "::notice::2. Click 'New repository secret'"
+            echo "::notice::3. Add these two secrets:"
+            echo "::notice::   • AWS_ACCESS_KEY_ID"
+            echo "::notice::   • AWS_SECRET_ACCESS_KEY"
+            echo ""
+            echo "::notice::📚 For the github-actions-amplify IAM user:"
+            echo "::notice::   - If you have existing credentials, use those"
+            echo "::notice::   - If you need new credentials, run:"
+            echo "::notice::     aws iam create-access-key --user-name github-actions-amplify"
+            echo ""
+            echo "::warning::⚠️ Skipping deployment until AWS credentials are configured"
+            echo "credentials_configured=false" >> $GITHUB_OUTPUT
+            exit 0
+          else
+            echo "✅ AWS credentials are configured"
+            echo "credentials_configured=true" >> $GITHUB_OUTPUT
+          fi
+      
+      # Only continue if credentials are configured
       - name: Cache dependencies
+        if: steps.check-aws-creds.outputs.credentials_configured == 'true'
         uses: actions/cache@v3
         with:
           path: |
@@ -44,94 +73,111 @@ jobs:
             ${{ runner.os }}-deps-
       
       - name: Install dependencies
-        run: npm ci --prefer-offline --no-audit
+        if: steps.check-aws-creds.outputs.credentials_configured == 'true'
+        run: npm ci --prefer-offline --no-audit || npm install
       
       - name: Auto-Fix Linting Issues
+        if: steps.check-aws-creds.outputs.credentials_configured == 'true'
         id: lint-fix
+        continue-on-error: true
         run: |
-          echo "🔧 Attempting to auto-fix lint issues..."
-          npm run lint:fix || npx eslint . --fix --ext .js,.jsx,.ts,.tsx || true
-          
-          if git diff --quiet; then
-            echo "✅ No lint issues found or fixed"
-            echo "fixed=false" >> $GITHUB_OUTPUT
+          npm run lint -- --fix || true
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_fixes=true" >> $GITHUB_OUTPUT
           else
-            echo "🔧 Lint issues were auto-fixed"
-            echo "fixed=true" >> $GITHUB_OUTPUT
+            echo "has_fixes=false" >> $GITHUB_OUTPUT
           fi
-      
-      - name: Auto-Fix Prettier Formatting
-        id: prettier-fix
-        run: |
-          echo "🎨 Attempting to auto-fix formatting..."
-          npx prettier --write "**/*.js" "**/*.jsx" "**/*.ts" "**/*.tsx" "**/*.css" "**/*.md" "**/*.json" --ignore-path .gitignore || true
-          
-          if git diff --quiet; then
-            echo "✅ No formatting issues"
-            echo "fixed=false" >> $GITHUB_OUTPUT
-          else
-            echo "🎨 Formatting was auto-fixed"
-            echo "fixed=true" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Commit Auto-Fixes
-        if: steps.lint-fix.outputs.fixed == 'true' || steps.prettier-fix.outputs.fixed == 'true'
-        run: |
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global user.name "github-actions[bot]"
-          
-          git add -A
-          git commit -m "🤖 Auto-fix: linting and formatting issues [skip ci]"
-          git push origin "main"
       
       - name: Configure AWS credentials
+        if: steps.check-aws-creds.outputs.credentials_configured == 'true'
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: eu-north-1
       
-      - name: Trigger Amplify Build
+      - name: Deploy Backend
+        if: steps.check-aws-creds.outputs.credentials_configured == 'true'
+        id: backend-deploy
         run: |
-          # Start a new Amplify build job
-          JOB_ID=$(aws amplify start-job \
-            --app-id dx0crz68xx8j3 \
-            --branch-name main \
-            --job-type RELEASE \
-            --region eu-north-1 \
-            --query 'jobSummary.jobId' \
-            --output text)
+          echo "Deploying backend for branch main..."
+          npx ampx pipeline-deploy --branch main --app-id dx0crz68xx8j3
+        continue-on-error: true
+      
+      - name: Generate Outputs
+        if: steps.check-aws-creds.outputs.credentials_configured == 'true' && steps.backend-deploy.outcome == 'success'
+        run: |
+          echo "Generating outputs..."
+          npx ampx generate outputs --branch main --app-id dx0crz68xx8j3
+      
+      - name: Trigger Frontend Deployment
+        if: steps.check-aws-creds.outputs.credentials_configured == 'true' && steps.backend-deploy.outcome == 'success'
+        run: |
+          echo "Triggering frontend deployment via webhook..."
+          curl -X POST -d "{}" -H "Content-Type: application/json" \
+            "https://webhooks.amplify.eu-north-1.amazonaws.com/prod/webhooks?id=615379bc-196c-4e14-8b16-bb1d69f14e48&token=Jv0dDofIr6Ph3mpqDsUXx5mV8SYCmTkiMkZTnz5g7zo"
+      
+      - name: Backend Deploy Failed - Check Errors
+        if: steps.check-aws-creds.outputs.credentials_configured == 'true' && steps.backend-deploy.outcome == 'failure'
+        run: |
+          echo "Backend deployment failed. Checking for common issues..."
           
-          echo "Started Amplify build job: $JOB_ID"
-          
-          # Wait for the job to complete (max 30 minutes)
-          COUNTER=0
-          MAX_ATTEMPTS=60
-          
-          while [ $COUNTER -lt $MAX_ATTEMPTS ]; do
-            STATUS=$(aws amplify get-job \
-              --app-id dx0crz68xx8j3 \
-              --branch-name main \
-              --job-id "$JOB_ID" \
-              --region eu-north-1 \
-              --query 'job.summary.status' \
-              --output text)
-            
-            echo "Build status: $STATUS (attempt $((COUNTER+1))/$MAX_ATTEMPTS)"
-            
-            if [[ "$STATUS" == "SUCCEED" ]]; then
-              echo "✅ Amplify build completed successfully!"
-              break
-            elif [[ "$STATUS" == "FAILED" ]] || [[ "$STATUS" == "CANCELLED" ]]; then
-              echo "❌ Amplify build failed with status: $STATUS"
-              exit 1
-            fi
-            
-            sleep 30
-            COUNTER=$((COUNTER+1))
-          done
-          
-          if [ $COUNTER -eq $MAX_ATTEMPTS ]; then
-            echo "❌ Build timed out after 30 minutes"
+          # Check if the app exists
+          aws amplify get-app --app-id dx0crz68xx8j3 2>/dev/null || {
+            echo "::error::App dx0crz68xx8j3 not found. Please ensure the app is created in Amplify Console."
             exit 1
+          }
+          
+          # Check if backend stack exists
+          STACK_STATUS=$(aws cloudformation describe-stacks \
+            --stack-name amplify-authminimalapp-main-branch-* \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "NOT_FOUND")
+          
+          if [ "$STACK_STATUS" = "NOT_FOUND" ]; then
+            echo "Backend stack doesn't exist. Creating..."
+            npx ampx pipeline-deploy --branch main --app-id dx0crz68xx8j3 || {
+              echo "::error::Failed to create backend stack"
+              exit 1
+            }
+          else
+            echo "Stack status: $STACK_STATUS"
+            echo "::error::Backend deployment failed with existing stack"
+            exit 1
+          fi
+      
+      - name: Commit Auto-Fixes
+        if: steps.check-aws-creds.outputs.credentials_configured == 'true' && steps.lint-fix.outputs.has_fixes == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add -A
+          git diff --staged --quiet || {
+            git commit -m "Auto-fix: Apply linting and formatting fixes [skip ci]"
+            git push
+          }
+      
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.check-aws-creds.outputs.credentials_configured }}" != "true" ]; then
+            echo "### ⚠️ AWS Credentials Not Configured" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Please add AWS credentials to GitHub Secrets to enable deployment:" >> $GITHUB_STEP_SUMMARY
+            echo "1. Go to [GitHub Secrets](https://github.com/${{ github.repository }}/settings/secrets/actions)" >> $GITHUB_STEP_SUMMARY
+            echo "2. Add \`AWS_ACCESS_KEY_ID\` and \`AWS_SECRET_ACCESS_KEY\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "After adding secrets, push any change or re-run this workflow." >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.backend-deploy.outcome }}" = "success" ]; then
+            echo "✅ Deployment successful!" >> $GITHUB_STEP_SUMMARY
+            echo "- Backend: Deployed" >> $GITHUB_STEP_SUMMARY
+            echo "- Frontend: Webhook triggered" >> $GITHUB_STEP_SUMMARY
+            echo "- App ID: dx0crz68xx8j3" >> $GITHUB_STEP_SUMMARY
+            echo "- Branch: main" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Deployment failed" >> $GITHUB_STEP_SUMMARY
+            echo "Check the logs for details." >> $GITHUB_STEP_SUMMARY
           fi
