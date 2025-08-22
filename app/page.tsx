@@ -1,13 +1,11 @@
-'use client';
+"use client";
 
 export default function Home() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
       <div className="max-w-md w-full space-y-8 text-center">
         <div>
-          <h1 className="text-6xl font-bold text-gray-900 mb-4">
-            Welcome
-          </h1>
+          <h1 className="text-6xl font-bold text-gray-900 mb-4">Welcome</h1>
           <p className="text-xl text-gray-600 mb-8">
             This is a public page that anyone can see
           </p>
@@ -19,9 +17,7 @@ export default function Home() {
           >
             Go to Secret Page 🔒
           </a>
-          <p className="text-sm text-gray-500">
-            (requires authentication)
-          </p>
+          <p className="text-sm text-gray-500">(requires authentication)</p>
         </div>
       </div>
     </div>
