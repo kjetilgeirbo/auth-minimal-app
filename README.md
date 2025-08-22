@@ -52,3 +52,4 @@ To learn more about AWS Amplify and Next.js, take a look at the following resour
 ## Support
 
 For support, please visit the [AWS Amplify Discord community](https://discord.gg/amplify).
+# Trigger deployment after auto-fix
