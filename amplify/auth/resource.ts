@@ -10,11 +10,4 @@ export const auth = defineAuth({
       mutable: true,
     },
   },
-  passwordPolicy: {
-    minimumLength: 8,
-    requireLowercase: true,
-    requireUppercase: true,
-    requireNumbers: true,
-    requireSymbols: true,
-  },
 });
